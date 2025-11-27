@@ -80,7 +80,32 @@ class GraphToTextModel(nn.Module):
         self.graph_to_llm_proj = nn.Linear(config.QFORMER_HIDDEN_DIM, llm_hidden_size)
         
         # Special tokens for prompting
-        self.prompt_template = "Describe the following molecule: "
+        # Match the training data format (ChEBI-style descriptions)
+        self.prompt_template = "The molecule is a "
+        
+        # Few-shot examples for improved generation
+        self.few_shot_examples = [
+            "The molecule is a disaccharide consisting beta-D-glucosyl and D-glucuronic acid residues joined by a (1->3)-linkage. It is a carbohydrate acid and a glycosylglucopyranuronic acid. It derives from a cellobiose. It is a conjugate acid of a 3-O-beta-D-glucosyl-D-glucuronate.",
+            "The molecule is a monochlorobenzoic acid carrying a chloro substituent at position 3. It has a role as a drug metabolite. It derives from a benzoic acid. It is a conjugate acid of a 3-chlorobenzoate."
+        ]
+    
+    def get_few_shot_prompt(self, num_examples=2):
+        """
+        Generate few-shot prompt with example molecule descriptions.
+        
+        Args:
+            num_examples: Number of examples to include (default: 2)
+        
+        Returns:
+            String containing few-shot examples
+        """
+        examples = self.few_shot_examples[:num_examples]
+        prompt = "Here are examples of molecule descriptions:\n\n"
+        for i, example in enumerate(examples, 1):
+            prompt += f"Example {i}: {example}\n\n"
+        prompt += "Now describe this molecule:\n"
+        prompt += self.prompt_template
+        return prompt
         
     def forward(self, batch, labels=None):
         """
@@ -98,10 +123,10 @@ class GraphToTextModel(nn.Module):
         graph = batch['graph']
         
         # 1. Encode graph (returns dense features already)
-        node_features_dense, _ = self.graph_encoder(graph)  # [batch_size, max_num_nodes, hidden_dim]
+        node_features_dense, _, graph_mask = self.graph_encoder(graph)  # [batch_size, max_num_nodes, hidden_dim]
         
         # 2. Extract features via Q-Former
-        query_output = self.qformer(node_features_dense, graph_mask=None)  # [batch_size, num_queries, hidden_dim]
+        query_output = self.qformer(node_features_dense, graph_mask=graph_mask)  # [batch_size, num_queries, hidden_dim]
         
         # 3. Project to LLM dimension
         graph_embeds = self.graph_to_llm_proj(query_output)  # [batch_size, num_queries, llm_hidden_size]
@@ -114,6 +139,10 @@ class GraphToTextModel(nn.Module):
             # Training mode: prepend graph embeddings to text
             input_ids = batch['input_ids']
             attention_mask = batch['attention_mask']
+            
+            # Mask padding tokens in labels
+            labels = batch['input_ids'].clone()
+            labels[attention_mask == 0] = -100
             
             # Get text embeddings
             text_embeds = self.llm.get_input_embeddings()(input_ids)
@@ -149,16 +178,23 @@ class GraphToTextModel(nn.Module):
             return graph_embeds
     
     @torch.no_grad()
-    def generate(self, batch, max_length=256, num_beams=4, temperature=0.7, top_p=0.9):
+    def generate(self, batch, max_new_tokens=256, num_beams=4, temperature=0.7, top_p=0.9, 
+                 repetition_penalty=1.0, no_repeat_ngram_size=0, length_penalty=1.0,
+                 use_few_shot=False, min_new_tokens=30):
         """
         Generate text descriptions for molecular graphs.
         
         Args:
             batch: Dictionary with 'graph' key
-            max_length: Maximum generation length
+            max_new_tokens: Maximum number of new tokens to generate
             num_beams: Number of beams for beam search
             temperature: Sampling temperature
             top_p: Nucleus sampling parameter
+            repetition_penalty: Penalty for repeating tokens (>1.0 discourages repetition)
+            no_repeat_ngram_size: Size of n-grams that can only occur once
+            length_penalty: Penalty for length (>1.0 encourages longer, <1.0 shorter)
+            use_few_shot: Whether to use few-shot prompting with examples
+            min_new_tokens: Minimum number of new tokens to generate (prevents truncation)
         
         Returns:
             List of generated text strings
@@ -166,10 +202,10 @@ class GraphToTextModel(nn.Module):
         graph = batch['graph']
         
         # 1. Encode graph (returns dense features)
-        node_features_dense, _ = self.graph_encoder(graph)
+        node_features_dense, _, graph_mask = self.graph_encoder(graph)
         
         # 2. Q-Former
-        query_output = self.qformer(node_features_dense, graph_mask=None)
+        query_output = self.qformer(node_features_dense, graph_mask=graph_mask)
         
         # 3. Project to LLM
         graph_embeds = self.graph_to_llm_proj(query_output)
@@ -177,12 +213,22 @@ class GraphToTextModel(nn.Module):
         
         batch_size = graph_embeds.size(0)
         
-        # 4. Prepare prompt
-        prompt_ids = self.tokenizer(
-            [self.prompt_template] * batch_size,
-            return_tensors='pt',
-            padding=True
-        ).input_ids.to(graph_embeds.device)
+        # 4. Prepare prompt (with optional few-shot examples)
+        if use_few_shot:
+            # Use few-shot prompt with examples
+            prompt_text = self.get_few_shot_prompt(num_examples=2)
+            prompt_ids = self.tokenizer(
+                [prompt_text] * batch_size,
+                return_tensors='pt',
+                padding=True
+            ).input_ids.to(graph_embeds.device)
+        else:
+            # Use simple prompt
+            prompt_ids = self.tokenizer(
+                [self.prompt_template] * batch_size,
+                return_tensors='pt',
+                padding=True
+            ).input_ids.to(graph_embeds.device)
         
         prompt_embeds = self.llm.get_input_embeddings()(prompt_ids)
         
@@ -197,22 +243,65 @@ class GraphToTextModel(nn.Module):
         )
         
         # 5. Generate
-        outputs = self.llm.generate(
-            inputs_embeds=inputs_embeds,
-            attention_mask=attention_mask,
-            max_length=max_length,
-            num_beams=num_beams,
-            temperature=temperature,
-            top_p=top_p,
-            do_sample=temperature > 0,
-            pad_token_id=self.tokenizer.pad_token_id,
-            eos_token_id=self.tokenizer.eos_token_id,
-        )
+        # Note: Cannot use sampling (do_sample=True) with beam search (num_beams > 1)
+        # Beam search is deterministic and incompatible with temperature/top_p sampling
+        if num_beams > 1:
+            # Use beam search (deterministic)
+            outputs = self.llm.generate(
+                inputs_embeds=inputs_embeds,
+                attention_mask=attention_mask,
+                max_new_tokens=max_new_tokens,
+                min_new_tokens=min_new_tokens,
+                num_beams=num_beams,
+                pad_token_id=self.tokenizer.pad_token_id,
+                eos_token_id=self.tokenizer.eos_token_id,
+                repetition_penalty=repetition_penalty,
+                no_repeat_ngram_size=no_repeat_ngram_size,
+                length_penalty=length_penalty,
+                early_stopping=True,  # Stop when all beams hit EOS
+            )
+        else:
+            # Use sampling (greedy or stochastic)
+            outputs = self.llm.generate(
+                inputs_embeds=inputs_embeds,
+                attention_mask=attention_mask,
+                max_new_tokens=max_new_tokens,
+                min_new_tokens=min_new_tokens,
+                do_sample=temperature > 0,
+                temperature=temperature if temperature > 0 else None,
+                top_p=top_p if temperature > 0 else None,
+                pad_token_id=self.tokenizer.pad_token_id,
+                eos_token_id=self.tokenizer.eos_token_id,
+                repetition_penalty=repetition_penalty,
+                no_repeat_ngram_size=no_repeat_ngram_size,
+            )
         
         # Decode
         generated_texts = self.tokenizer.batch_decode(outputs, skip_special_tokens=True)
         
-        # Remove prompt from generated text
-        generated_texts = [text.replace(self.prompt_template, "").strip() for text in generated_texts]
+        # Clean up generated text (keep "The molecule is a" prefix as per training data)
+        if use_few_shot:
+            # Remove few-shot examples but keep the final prompt template + generation
+            cleaned_texts = []
+            for text in generated_texts:
+                # Find the last occurrence of the prompt template
+                if self.prompt_template in text:
+                    # Split at last occurrence and keep prompt + everything after
+                    parts = text.rsplit(self.prompt_template, 1)
+                    cleaned_texts.append(self.prompt_template + parts[-1].strip())
+                else:
+                    # If prompt not found, prepend it manually
+                    cleaned_texts.append(self.prompt_template + text.strip())
+            generated_texts = cleaned_texts
+        else:
+            # Keep the prompt template in the output (matches training data format)
+            # Just ensure it's present at the start
+            cleaned_texts = []
+            for text in generated_texts:
+                if not text.startswith(self.prompt_template):
+                    cleaned_texts.append(self.prompt_template + text.strip())
+                else:
+                    cleaned_texts.append(text.strip())
+            generated_texts = cleaned_texts
         
         return generated_texts

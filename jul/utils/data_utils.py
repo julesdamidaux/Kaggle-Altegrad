@@ -35,18 +35,33 @@ class MoleculeGraphDataset(Dataset):
         
         # Tokenize description
         text = graph.description
+        
+        # Tokenize with truncation but leave room for EOS
         tokenized = self.tokenizer(
             text,
-            max_length=self.max_length,
-            padding='max_length',
+            max_length=self.max_length - 1,
             truncation=True,
+            padding=False,
             return_tensors='pt'
         )
         
+        input_ids = tokenized['input_ids'].squeeze(0)
+        attention_mask = tokenized['attention_mask'].squeeze(0)
+        
+        # Append EOS token
+        input_ids = torch.cat([input_ids, torch.tensor([self.tokenizer.eos_token_id])])
+        attention_mask = torch.cat([attention_mask, torch.tensor([1])])
+        
+        # Pad to max_length
+        pad_len = self.max_length - input_ids.size(0)
+        if pad_len > 0:
+            input_ids = torch.cat([input_ids, torch.full((pad_len,), self.tokenizer.pad_token_id, dtype=input_ids.dtype)])
+            attention_mask = torch.cat([attention_mask, torch.zeros((pad_len,), dtype=attention_mask.dtype)])
+            
         return {
             'graph': graph,
-            'input_ids': tokenized['input_ids'].squeeze(0),
-            'attention_mask': tokenized['attention_mask'].squeeze(0),
+            'input_ids': input_ids,
+            'attention_mask': attention_mask,
             'text': text,
             'id': graph.id
         }

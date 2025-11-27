@@ -2,7 +2,7 @@
 
 import torch
 import torch.nn as nn
-from transformers import GraphormerModel
+from transformers import GraphormerForGraphClassification
 from torch_geometric.data import Batch
 from torch_geometric.utils import to_dense_batch
 
@@ -19,7 +19,9 @@ class PretrainedGraphormerEncoder(nn.Module):
         super().__init__()
         
         print(f"Loading pretrained Graphormer: {model_name}")
-        self.graphormer = GraphormerModel.from_pretrained(model_name)
+        # Load as Classification model to match checkpoint structure, then extract encoder
+        full_model = GraphormerForGraphClassification.from_pretrained(model_name)
+        self.graphormer = full_model.encoder
         
         # FREEZE all parameters
         print("Freezing Graphormer parameters (not trainable)")
@@ -128,6 +130,8 @@ class PretrainedGraphormerEncoder(nn.Module):
         # Take first hop (index 0) and first feature (index 0)
         inputs['attn_edge_type'] = inputs['input_edges'][:, :, :, 0, 0].long()
         
+        inputs['node_mask'] = node_mask
+        
         return inputs
     
     @torch.no_grad()  # No gradients through Graphormer
@@ -139,13 +143,13 @@ class PretrainedGraphormerEncoder(nn.Module):
             batch: PyG Batch object
         
         Returns:
-            node_features: [batch_size, max_num_nodes, hidden_dim]
+            node_features: [batch_size, max_num_nodes + 1, hidden_dim]
             graph_features: [batch_size, hidden_dim]
+            node_mask: [batch_size, max_num_nodes + 1]
         """
         # Prepare inputs for Graphormer
         inputs = self.prepare_graphormer_inputs(batch)
-        # (Optional) Debug print – can be removed later
-        # print('DEBUG attn_bias shape:', inputs['attn_bias'].shape)
+        
         # Call Graphormer with required positional arguments
         outputs = self.graphormer(
             input_nodes=inputs['input_nodes'],
@@ -156,13 +160,24 @@ class PretrainedGraphormerEncoder(nn.Module):
             spatial_pos=inputs['spatial_pos'],
             attn_edge_type=inputs['attn_edge_type']
         )
-        # Get node-level features [batch_size, num_nodes, hidden_dim]
+        
+        # Get node-level features [batch_size, num_nodes + 1, hidden_dim]
+        # (Includes virtual node at index 0)
         node_features_dense = outputs.last_hidden_state
+        
         # Get graph-level features (use first token as graph representation)
         graph_features = node_features_dense[:, 0, :]  # [batch_size, hidden_dim]
+        
         # Project if needed
         graph_features = self.proj(graph_features)
         # Project node features as well (optional, keep same dim)
         node_features_dense = self.proj(node_features_dense)
-        return node_features_dense, graph_features
+        
+        # Create mask for node features (including virtual node)
+        node_mask = inputs['node_mask']  # [batch_size, num_nodes]
+        batch_size = node_mask.size(0)
+        virtual_node_mask = torch.ones(batch_size, 1, device=node_mask.device, dtype=node_mask.dtype)
+        full_node_mask = torch.cat([virtual_node_mask, node_mask], dim=1)  # [batch_size, num_nodes + 1]
+        
+        return node_features_dense, graph_features, full_node_mask
 

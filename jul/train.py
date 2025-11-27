@@ -128,6 +128,13 @@ def main():
         weight_decay=config.WEIGHT_DECAY
     )
     
+    # Learning rate scheduler
+    scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
+        optimizer,
+        T_max=config.MAX_EPOCHS,
+        eta_min=1e-6
+    )
+    
     # Training loop
     print("\n" + "="*80)
     print("Starting training...")
@@ -154,16 +161,16 @@ def main():
             'val_loss': val_loss
         })
         
-        # Save checkpoint
-        checkpoint_path = os.path.join(config.CHECKPOINT_DIR, f"checkpoint_epoch_{epoch}.pt")
-        torch.save({
-            'epoch': epoch,
-            'model_state_dict': model.state_dict(),
-            'optimizer_state_dict': optimizer.state_dict(),
-            'train_loss': train_loss,
-            'val_loss': val_loss,
-        }, checkpoint_path)
-        print(f"Saved checkpoint: {checkpoint_path}")
+        # # Save checkpoint
+        # checkpoint_path = os.path.join(config.CHECKPOINT_DIR, f"checkpoint_epoch_{epoch}.pt")
+        # torch.save({
+        #     'epoch': epoch,
+        #     'model_state_dict': model.state_dict(),
+        #     'optimizer_state_dict': optimizer.state_dict(),
+        #     'train_loss': train_loss,
+        #     'val_loss': val_loss,
+        # }, checkpoint_path)
+        # print(f"Saved checkpoint: {checkpoint_path}")
         
         # Save best model
         if val_loss < best_val_loss:
@@ -175,6 +182,10 @@ def main():
                 'val_loss': val_loss,
             }, best_path)
             print(f"New best model saved! Val Loss: {val_loss:.4f}")
+        
+        # Step scheduler
+        scheduler.step()
+        print(f"Learning rate: {optimizer.param_groups[0]['lr']:.2e}")
     
     # Save training history
     history_path = os.path.join(config.LOG_DIR, "training_history.json")

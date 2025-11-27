@@ -1,0 +1,5 @@
+- use chemical llm
+- use chembert in the baseline
+- use encoder llm end to end
+- change loss in qformer
+- add token between graph and text

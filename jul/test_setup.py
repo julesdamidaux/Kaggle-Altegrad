@@ -109,7 +109,7 @@ def test_generation(model, loader):
         batch['graph'] = batch['graph'].to(config.DEVICE)
         
         with torch.no_grad():
-            captions = model.generate(batch, max_length=50, num_beams=2)
+            captions = model.generate(batch, max_new_tokens=50, num_beams=2)
         
         print(f"✓ Generation successful")
         print(f"  - Generated {len(captions)} captions")

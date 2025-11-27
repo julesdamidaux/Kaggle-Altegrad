@@ -24,12 +24,19 @@ def generate_captions(model, dataloader, device):
         # Generate
         captions = model.generate(
             batch,
-            max_length=config.GENERATION_MAX_LENGTH,
+            max_new_tokens=config.GENERATION_MAX_NEW_TOKENS,
+            min_new_tokens=config.GENERATION_MIN_NEW_TOKENS,
             num_beams=config.GENERATION_NUM_BEAMS,
             temperature=config.GENERATION_TEMPERATURE,
-            top_p=config.GENERATION_TOP_P
+            top_p=config.GENERATION_TOP_P,
+            repetition_penalty=config.GENERATION_REPETITION_PENALTY,
+            no_repeat_ngram_size=config.GENERATION_NO_REPEAT_NGRAM_SIZE,
+            length_penalty=config.GENERATION_LENGTH_PENALTY,
+            use_few_shot=config.USE_FEW_SHOT_PROMPTING
         )
-        
+
+        # print(captions)
+
         all_ids.extend(batch['ids'])
         all_captions.extend(captions)
     
