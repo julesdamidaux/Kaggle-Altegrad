@@ -23,7 +23,8 @@ QFORMER_NUM_LAYERS = 6 # 6
 QFORMER_NUM_HEADS = 8  # 8
 
 # LLM Decoder
-LLM_MODEL_NAME = "Qwen/Qwen3-1.7B-Base"  # Small model for 24GB GPU
+# LLM Decoder
+LLM_MODEL_NAME = "Qwen/Qwen3-4B"  # Upgraded to 4B model
 USE_LORA = True  # Use LoRA for efficient fine-tuning
 LORA_R = 16
 LORA_ALPHA = 32
@@ -32,11 +33,19 @@ LORA_DROPOUT = 0.05
 # =========================================================
 # Training Configuration
 # =========================================================
-BATCH_SIZE = 8  # Small batch size for memory efficiency
-GRADIENT_ACCUMULATION_STEPS = 8  
-MAX_EPOCHS = 10  # Increased for better convergence
-LEARNING_RATE = 2e-5
-# WARMUP_STEPS = 500
+# TRAIN_STAGE is now automated.
+EPOCHS_STAGE1 = 4  # Phase 1: Frozen LLM (Q-Former only)
+EPOCHS_STAGE2 = 4  # Phase 2: Joint Training (LoRA)
+
+BATCH_SIZE = 4  # Reduced to 4 for 4B model on 24GB GPU
+GRADIENT_ACCUMULATION_STEPS = 32  # Increased to maintain effective batch size
+
+# Learning Rates
+LEARNING_RATE_STAGE1_HEAD = 1e-4  # Phase 1: Q-Former + Projector
+LEARNING_RATE_STAGE2_HEAD = 5e-5  # Phase 2: Q-Former + Projector
+LEARNING_RATE_STAGE2_LORA = 1e-5  # Phase 2: LLM LoRA
+
+WARMUP_STEPS = 120  # 10% of total training steps (~2420)
 MAX_LENGTH = 256  # Maximum caption length
 
 # Optimization
@@ -56,15 +65,15 @@ LOG_DIR = "./logs"
 # =========================================================
 # Inference Configuration
 # =========================================================
-GENERATION_MAX_NEW_TOKENS = 200  # Maximum number of new tokens to generate
+GENERATION_MAX_NEW_TOKENS = 256  # Maximum number of new tokens to generate
 GENERATION_MIN_NEW_TOKENS = 30  # Minimum tokens to prevent truncation
-GENERATION_NUM_BEAMS = 1  # Use sampling instead of beam search
-GENERATION_TEMPERATURE = 0.7  # Standard temperature for generation
+GENERATION_NUM_BEAMS = 1  # Reverted to 1 (sampling) to save memory
+GENERATION_TEMPERATURE = 0.2  # Low temperature for stability
 GENERATION_TOP_P = 0.9  # Nucleus sampling
-GENERATION_REPETITION_PENALTY = 1.1  # Mild penalty
-GENERATION_NO_REPEAT_NGRAM_SIZE = 0  # Disable hard n-gram blocking
-GENERATION_LENGTH_PENALTY = 1.2  # Encourage longer, complete descriptions
+GENERATION_REPETITION_PENALTY = 1.2  # Increased to prevent loops
+GENERATION_NO_REPEAT_NGRAM_SIZE = 0  # Standard value
+GENERATION_LENGTH_PENALTY = 1.0  # Neutral length penalty
 
 # Prompt Engineering
-USE_FEW_SHOT_PROMPTING = True  # Enable few-shot learning with examples (increases inference time)
+USE_FEW_SHOT_PROMPTING = True  
 

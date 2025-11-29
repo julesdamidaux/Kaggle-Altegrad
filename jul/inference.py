@@ -21,7 +21,6 @@ def generate_captions(model, dataloader, device):
     for batch in tqdm(dataloader, desc="Generating captions"):
         batch['graph'] = batch['graph'].to(device)
         
-        # Generate
         captions = model.generate(
             batch,
             max_new_tokens=config.GENERATION_MAX_NEW_TOKENS,
@@ -45,8 +44,10 @@ def generate_captions(model, dataloader, device):
 
 def main():
     print(f"Device: {config.DEVICE}")
+
+    if config.DEVICE == "cuda":
+        torch.cuda.empty_cache()
     
-    # Load model
     print("\n" + "="*80)
     print("Loading model...")
     print("="*80)
@@ -54,7 +55,6 @@ def main():
     model = GraphToTextModel()
     model = model.to(config.DEVICE)
     
-    # Load checkpoint
     checkpoint_path = os.path.join(config.CHECKPOINT_DIR, "best_model.pt")
     if not os.path.exists(checkpoint_path):
         print(f"Error: Checkpoint not found at {checkpoint_path}")
@@ -66,7 +66,6 @@ def main():
     model.load_state_dict(checkpoint['model_state_dict'])
     print(f"Loaded model from epoch {checkpoint['epoch']} with val_loss={checkpoint['val_loss']:.4f}")
     
-    # Load test dataset
     print("\n" + "="*80)
     print("Loading test dataset...")
     print("="*80)
@@ -80,20 +79,17 @@ def main():
         num_workers=0
     )
     
-    # Generate captions
     print("\n" + "="*80)
     print("Generating captions...")
     print("="*80)
     
     ids, captions = generate_captions(model, test_loader, config.DEVICE)
     
-    # Create output dataframe
     results_df = pd.DataFrame({
         'ID': ids,
         'description': captions
     })
     
-    # Save results
     os.makedirs(config.OUTPUT_DIR, exist_ok=True)
     output_path = os.path.join(config.OUTPUT_DIR, "test_predictions.csv")
     results_df.to_csv(output_path, index=False)
@@ -102,7 +98,6 @@ def main():
     print(f"Saved {len(results_df)} predictions to: {output_path}")
     print("="*80)
     
-    # Print some examples
     print("\nExample predictions:")
     print("="*80)
     for i in range(min(5, len(results_df))):

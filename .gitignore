@@ -3,3 +3,4 @@
 *.pyc
 /jul/.venv
 *.pt
+/jul/wandb
