@@ -1,6 +1,6 @@
 *.pkl
-*.csv
 *.pyc
 /jul/.venv
+/jul/venv
 *.pt
 /jul/wandb

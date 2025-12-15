@@ -15,7 +15,8 @@ class PretrainedGraphormerEncoder(nn.Module):
     This encoder is FROZEN - we don't train it, only use it for feature extraction.
     """
     
-    def __init__(self, model_name="clefourrier/graphormer-base-pcqm4mv2", hidden_dim=768):
+    
+    def __init__(self, model_name="clefourrier/graphormer-base-pcqm4mv2", hidden_dim=768, freeze=True):
         super().__init__()
         
         print(f"Loading pretrained Graphormer: {model_name}")
@@ -23,12 +24,17 @@ class PretrainedGraphormerEncoder(nn.Module):
         full_model = GraphormerForGraphClassification.from_pretrained(model_name)
         self.graphormer = full_model.encoder
         
-        # FREEZE all parameters
-        print("Freezing Graphormer parameters (not trainable)")
-        for param in self.graphormer.parameters():
-            param.requires_grad = False
-        
-        self.graphormer.eval()  # Set to eval mode
+        if freeze:
+            print("Freezing Graphormer parameters (not trainable)")
+            for param in self.graphormer.parameters():
+                param.requires_grad = False
+            self.graphormer.eval()  # Set to eval mode
+        else:
+            print("Unfreezing Graphormer parameters (TRAINABLE)")
+            self.graphormer.train() # Set to train mode
+            # Enable gradients
+            for param in self.graphormer.parameters():
+                param.requires_grad = True
         
         self.hidden_dim = hidden_dim
         self.graphormer_hidden_dim = self.graphormer.config.hidden_size  # 768
@@ -134,7 +140,7 @@ class PretrainedGraphormerEncoder(nn.Module):
         
         return inputs
     
-    @torch.no_grad()  # No gradients through Graphormer
+    # Removed @torch.no_grad() to allow training
     def forward(self, batch):
         """
         Forward pass through frozen Graphormer.

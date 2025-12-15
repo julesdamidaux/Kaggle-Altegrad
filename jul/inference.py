@@ -34,7 +34,7 @@ def generate_captions(model, dataloader, device):
             use_few_shot=config.USE_FEW_SHOT_PROMPTING
         )
 
-        # print(captions)
+        print(captions)
 
         all_ids.extend(batch['ids'])
         all_captions.extend(captions)
@@ -44,15 +44,16 @@ def generate_captions(model, dataloader, device):
 
 def main():
     print(f"Device: {config.DEVICE}")
-
-    if config.DEVICE == "cuda":
-        torch.cuda.empty_cache()
     
     print("\n" + "="*80)
     print("Loading model...")
     print("="*80)
     
-    model = GraphToTextModel()
+    model = GraphToTextModel(token=config.hf_token)
+    
+    if config.USE_LORA:
+        model.apply_lora()
+        
     model = model.to(config.DEVICE)
     
     checkpoint_path = os.path.join(config.CHECKPOINT_DIR, "best_model.pt")
@@ -78,6 +79,11 @@ def main():
         collate_fn=collate_fn,
         num_workers=0
     )
+
+    # DEBUG: Verify IDs
+    print("Verifying first 5 IDs in test dataset:")
+    for i in range(min(5, len(test_dataset))):
+        print(f"Index {i}: ID {test_dataset.graphs[i].id}")
     
     print("\n" + "="*80)
     print("Generating captions...")

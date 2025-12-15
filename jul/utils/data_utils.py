@@ -33,12 +33,9 @@ class MoleculeGraphDataset(Dataset):
     def __getitem__(self, idx):
         graph = self.graphs[idx]
         
-        # Tokenize description
-        text = graph.description
-        
         # Tokenize with truncation but leave room for EOS
         tokenized = self.tokenizer(
-            text,
+            graph.description,
             max_length=self.max_length - 1,
             truncation=True,
             padding=False,
@@ -62,7 +59,7 @@ class MoleculeGraphDataset(Dataset):
             'graph': graph,
             'input_ids': input_ids,
             'attention_mask': attention_mask,
-            'text': text,
+            'text': graph.description,
             'id': graph.id
         }
 
