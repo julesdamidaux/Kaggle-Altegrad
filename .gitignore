@@ -4,3 +4,23 @@
 /jul/venv
 *.pt
 /jul/wandb
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# PyTorch / training
+checkpoints/
+**/checkpoints/
+*.pt
+*.pth
+*.ckpt
+
+# Caches
+.cache/
+.ipynb_checkpoints/
+
+# OS
+.DS_Store
