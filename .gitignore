@@ -5,6 +5,11 @@
 *.pt
 /jul/wandb
 
+# CSV files (large datasets)
+*_smiles.csv
+train_smiles_2k.csv
+test_smiles.csv
+
 # Python
 __pycache__/
 *.pyc
