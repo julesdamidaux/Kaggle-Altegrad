@@ -1,1 +1,1 @@
-- jul repository: Q-former training. (specific README in the folder)
+- q-former repository: Q-former training. (specific README in the folder)
