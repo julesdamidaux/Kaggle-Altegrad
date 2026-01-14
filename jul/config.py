@@ -28,7 +28,7 @@ QFORMER_NUM_LAYERS = 6 # 6
 QFORMER_NUM_HEADS = 8  # 8
 
 # LLM Decoder
-hf_token = "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"
+hf_token = "your_hf_token"
 
 LLM_MODEL_NAME = "Qwen/Qwen2.5-1.5B-Instruct"
 GRAPH_TOKEN = "<graph>"
