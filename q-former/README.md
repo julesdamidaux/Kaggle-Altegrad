@@ -88,7 +88,7 @@ CSV with columns: `ID`, `description`
 ## File Structure
 
 ```
-jul/
+q-former/
 ├── config.py              # All hyperparameters
 ├── train.py              # Training script (EXECUTE)
 ├── inference.py          # Inference script (EXECUTE)
