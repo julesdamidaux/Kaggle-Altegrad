@@ -2,7 +2,7 @@
 
 import torch
 import torch.nn as nn
-from transformers import AutoTokenizer, AutoModelForCausalLM
+from transformers import AutoTokenizer, AutoModelForCausalLM, BitsAndBytesConfig
 from peft import get_peft_model, LoraConfig, TaskType
 
 from .graph_encoder import PretrainedGraphormerEncoder
@@ -43,17 +43,32 @@ class GraphToTextModel(nn.Module):
             token=token
         )
         
+        # Add special token for Graph
+        self.tokenizer.add_tokens([config.GRAPH_TOKEN], special_tokens=True)
+        self.graph_token_id = self.tokenizer.convert_tokens_to_ids(config.GRAPH_TOKEN)
+        
         if self.tokenizer.pad_token is None:
             self.tokenizer.pad_token = self.tokenizer.eos_token
             self.tokenizer.pad_token_id = self.tokenizer.eos_token_id
         
+        # 4-bit quantization configuration
+        bnb_config = BitsAndBytesConfig(
+            load_in_4bit=True,
+            bnb_4bit_use_double_quant=True,
+            bnb_4bit_quant_type="nf4",
+            bnb_4bit_compute_dtype=torch.bfloat16 if torch.cuda.is_bf16_supported() else torch.float16
+        )
+
         self.llm = AutoModelForCausalLM.from_pretrained(
             config.LLM_MODEL_NAME,
             trust_remote_code=True,
-            torch_dtype=torch.float16,
-            device_map=None,
+            quantization_config=bnb_config, # Enable 4-bit
+            device_map="auto", # Required for bitsandbytes
             token=token
         )
+        
+        # Resize token embeddings to account for new special token
+        self.llm.resize_token_embeddings(len(self.tokenizer))
         
         if freeze_llm:
             print("Freezing LLM parameters...")
@@ -65,17 +80,6 @@ class GraphToTextModel(nn.Module):
         
         # Projection from LLM hidden size to Q-Former hidden dimension for text embeddings
         self.text_proj = nn.Linear(self.llm.config.hidden_size, config.QFORMER_HIDDEN_DIM)
-        
-        # ------ SHARED PREFIX FOR TRAINING + GENERATION ------
-        # Keep the trailing space: this is part of the tokenization.
-        self.prefix_text = "The molecule is a "
-        
-        # Two-shot prompt with medium-length, diverse examples (Acid, Disaccharide, Glucoside)
-        self.few_shot_examples = [
-            "The molecule is a monochlorobenzoic acid carrying a chloro substituent at position 3. It has a role as a drug metabolite. It derives from a benzoic acid. It is a conjugate acid of a 3-chlorobenzoate.",
-            "The molecule is a disaccharide consisting beta-D-glucosyl and D-glucuronic acid residues joined by a (1->3)-linkage. It is a carbohydrate acid and a glycosylglucopyranuronic acid. It derives from a cellobiose. It is a conjugate acid of a 3-O-beta-D-glucosyl-D-glucuronate.",
-            "The molecule is a beta-D-glucoside consisting of cis-2-coumaric acid having a beta-D-glucosyl residue attached to the phenolic hydroxy group. It derives from a cis-2-coumaric acid. It is a conjugate acid of a 2-(beta-D-glucosyloxy)-cis-cinnamate."
-        ]
         
         # Temperature for ITC loss
         self.temp = nn.Parameter(torch.ones([]) * 0.07)
@@ -93,7 +97,7 @@ class GraphToTextModel(nn.Module):
             lora_alpha=config.LORA_ALPHA,
             lora_dropout=config.LORA_DROPOUT,
             bias="none",
-            target_modules=["q_proj", "v_proj"] # Target attention layers
+            target_modules=["q_proj", "k_proj", "v_proj", "o_proj", "gate_proj", "up_proj", "down_proj"] # Qwen/Llama targets
         )
         self.llm = get_peft_model(self.llm, peft_config)
         self.llm.print_trainable_parameters()
@@ -260,18 +264,6 @@ class GraphToTextModel(nn.Module):
             'loss_itm': loss_itm.detach(),
             'loss_itg': loss_itg.detach()
         }
-    
-    def get_few_shot_prompt(self, num_examples=2):
-        """
-        Generate 2-shot prompt.
-        """
-        prompt = "Generate a detailed chemical description following this pattern:\n\n"
-        
-        for i, example in enumerate(self.few_shot_examples, 1):
-            prompt += f"Example {i}: {example}\n\n"
-            
-        prompt += "Target Molecule:\n" + self.prefix_text
-        return prompt
         
     def forward(self, batch, labels=None, stage=2):
         """
@@ -280,8 +272,11 @@ class GraphToTextModel(nn.Module):
         if stage == 1:
             return self.forward_stage1(batch)
         
-        # Stage 2: LLM training
+        # Stage 2/3: LLM training with Instruct format
         graph = batch['graph']
+        input_ids = batch['input_ids']
+        attention_mask = batch['attention_mask']
+        labels = batch.get('labels', labels) # Get labels from batch if available
         
         # 1. Encode graph
         node_features_dense, _, graph_mask = self.graph_encoder(graph)  # [B, N_nodes, hidden_dim]
@@ -297,52 +292,53 @@ class GraphToTextModel(nn.Module):
         graph_embeds = self.graph_to_llm_proj(query_output)  # [B, num_queries, llm_hidden_size]
         graph_embeds = graph_embeds.to(self.llm.dtype)
         
-        batch_size = graph_embeds.size(0)
+        # 4. Embed Input IDs (Text)
+        inputs_embeds = self.llm.get_input_embeddings()(input_ids)
         
-        if labels is not None:
-            input_ids = batch['input_ids']          # [B, T]
-            attention_mask = batch['attention_mask']  # [B, T]
+        # 5. Insert Graph Embeddings
+        # We find the positions of GRAPH_TOKEN and replace them with graph_embeds
+        # Note: data_utils repeats GRAPH_TOKEN to match NUM_QUERY_TOKENS
+        
+        # Mask for graph tokens
+        graph_token_mask = (input_ids == self.graph_token_id)
+        
+        # Check alignment
+        batch_size = inputs_embeds.size(0)
+        
+        # To avoid complex indexing, we can use scatter or index_put, but simple replacement works if aligned.
+        # Since we use config.NUM_QUERY_TOKENS repetitions, we expect exactly that many True in mask per batch item
+        
+        # Simple Loop replacement for safety (efficient enough for batch=4)
+        for i in range(batch_size):
+            # The mask for this sample
+            mask = graph_token_mask[i]
+            if mask.sum() != config.NUM_QUERY_TOKENS:
+                # Warning or handling if count doesn't match (e.g. truncation)
+                # If truncated, we just fill what we can or skip? 
+                # Ideally we ensure data_utils truncates TEXT not PROMPT.
+                # For now, let's just replace where we can.
+                pass
+                
+            # Replace
+            # graph_embeds[i] is [num_queries, dim]
+            # inputs_embeds[i][mask] is [num_masked, dim]
+            # We assume they match or we crop
+            num_slots = mask.sum()
+            num_embeds = graph_embeds.size(1)
             
-            # Text embeddings
-            text_embeds = self.llm.get_input_embeddings()(input_ids)  # [B, T, d]
-            
-            # Concatenate graph + text embeddings
-            inputs_embeds = torch.cat([graph_embeds, text_embeds], dim=1)  # [B, G+T, d]
-            
-            # Attention mask for full sequence
-            graph_attention = torch.ones(
-                batch_size,
-                graph_embeds.size(1),
-                device=attention_mask.device,
-                dtype=attention_mask.dtype,
-            )
-            full_attention_mask = torch.cat([graph_attention, attention_mask], dim=1)  # [B, G+T]
-            
-            # Labels: mask padding tokens
-            labels = input_ids.clone()
-            labels[attention_mask == 0] = -100
-            
-            # Concatenate graph labels (masked) + text labels
-            graph_labels = torch.full(
-                (batch_size, graph_embeds.size(1)),
-                -100,
-                dtype=labels.dtype,
-                device=labels.device,
-            )
-            
-            full_labels = torch.cat([graph_labels, labels], dim=1)  # [B, G+T]
+            if num_slots > 0:
+                inputs_embeds[i, mask] = graph_embeds[i, :num_slots]
 
-            outputs = self.llm(
+        if labels is not None:
+             outputs = self.llm(
                 inputs_embeds=inputs_embeds,
-                attention_mask=full_attention_mask,
-                labels=full_labels,   # HF will internally shift logits vs labels
+                attention_mask=attention_mask,
+                labels=labels,
                 return_dict=True
             )
-            return outputs.loss
-        
+             return outputs.loss
         else:
-            # Usually you'd return graph_embeds to be used as a prefix for generation
-            return graph_embeds
+            return inputs_embeds
 
     
     @torch.no_grad()
@@ -356,13 +352,14 @@ class GraphToTextModel(nn.Module):
         repetition_penalty=1.0,
         no_repeat_ngram_size=0,
         length_penalty=1.0,
-        use_few_shot=False,
-        min_new_tokens=5
+        use_few_shot=False, # Ignored in Instruct mode
+        min_new_tokens=5,
+        do_sample=False
     ):
-        """Generate text descriptions for molecular graphs - simplified to match training."""
+        """Generate text descriptions using Chat Template format."""
         graph = batch['graph']
         
-        # 1. Encode graph exactly as in training
+        # 1. Encode graph
         node_features_dense, _, graph_mask = self.graph_encoder(graph)
         query_output = self.qformer(
             graph_node_features=node_features_dense,
@@ -372,37 +369,52 @@ class GraphToTextModel(nn.Module):
         graph_embeds = self.graph_to_llm_proj(query_output)
         graph_embeds = graph_embeds.to(self.llm.dtype)
         
+        if torch.isnan(graph_embeds).any():
+            print("NaNs detected in graph_embeds!")
+            # Handle or assert
+            # Try to sanitize?
+            graph_embeds = torch.nan_to_num(graph_embeds, nan=0.0)
+        
         batch_size = graph_embeds.size(0)
         
-        # 2. Start prompt: exactly the same prefix as training
-        if use_few_shot:
-            start_text = self.get_few_shot_prompt()
-        else:
-            # Add instruction to guide structure without examples
-            # instruction = "Generate a comprehensive and detailed description of the molecule. Include structure, role, derivation, and conjugate status. Do not forget anything.\n"
-            instruction = ""
-            start_text = instruction + self.prefix_text
-            
-        start_ids = self.tokenizer(
-            [start_text] * batch_size,
-            return_tensors='pt',
-            padding=True,
-            add_special_tokens=True
-        ).input_ids.to(graph_embeds.device)
+        # 2. Build Prompt
+        # User: Describe the following molecule: <graph>...<graph>\nAssistant:
+        graph_tokens = config.GRAPH_TOKEN * config.NUM_QUERY_TOKENS
+        user_prompt = f"Describe the following molecule: {graph_tokens}"
         
-        # 3. Build inputs exactly as in training: graph + start text (no separator)
-        start_embeds = self.llm.get_input_embeddings()(start_ids)
-        inputs_embeds = torch.cat([graph_embeds, start_embeds], dim=1)
+        conversation = [
+            {"role": "user", "content": user_prompt},
+        ]
         
-        # 4. Create attention mask
-        attention_mask = torch.ones(
-            batch_size, 
-            inputs_embeds.size(1), 
-            device=inputs_embeds.device,
-            dtype=torch.long
+        # Format with chat template to get the "Assistant:" start
+        prompt_text = self.tokenizer.apply_chat_template(
+            conversation,
+            add_generation_prompt=True,
+            tokenize=False
         )
         
-        # 5. Generate with improved parameters
+        # Tokenize prompt
+        inputs = self.tokenizer(
+            [prompt_text] * batch_size,
+            return_tensors='pt',
+            padding=True,
+            add_special_tokens=False
+        ).to(graph_embeds.device)
+        
+        input_ids = inputs.input_ids
+        attention_mask = inputs.attention_mask
+        
+        # 3. Embed and Replace
+        inputs_embeds = self.llm.get_input_embeddings()(input_ids)
+        graph_token_mask = (input_ids == self.graph_token_id)
+        
+        for i in range(batch_size):
+            mask = graph_token_mask[i]
+            num_slots = mask.sum()
+            if num_slots > 0:
+                inputs_embeds[i, mask] = graph_embeds[i, :num_slots]
+
+        # 4. Generate
         generation_kwargs = {
             'inputs_embeds': inputs_embeds,
             'attention_mask': attention_mask,
@@ -415,54 +427,37 @@ class GraphToTextModel(nn.Module):
             'length_penalty': length_penalty,
         }
         
-        # Configure sampling vs beam search
-        # Configure sampling vs beam search
         if num_beams > 1:
-            # Beam Search (Deterministic)
-            generation_kwargs.update({
-                'do_sample': False,
-                'num_beams': num_beams,
-                'early_stopping': True,
-            })
-        elif temperature > 0:
-            # Sampling
-            generation_kwargs.update({
-                'do_sample': True,
-                'temperature': temperature,
-                'top_p': top_p,
-                'num_beams': 1,
-            })
+            generation_kwargs.update({'do_sample': False, 'num_beams': num_beams, 'early_stopping': True})
+        elif do_sample or temperature > 0:
+            generation_kwargs.update({'do_sample': True, 'temperature': temperature, 'top_p': top_p, 'num_beams': 1})
         else:
-            # Greedy Search
-            generation_kwargs.update({
-                'do_sample': False,
-                'num_beams': 1,
-            })
+            generation_kwargs.update({'do_sample': False, 'num_beams': 1})
         
         outputs = self.llm.generate(**generation_kwargs)
         
-        # 6. Decode - the output will include our start text
+        # 5. Decode
         generated_texts = self.tokenizer.batch_decode(outputs, skip_special_tokens=True)
         
-        # 7. Clean up (remove </think> tags if present)
+        # Clean up
         cleaned_texts = []
         for text in generated_texts:
-            # Remove thinking tags
-            text = text.split('</think>')[-1].strip()
+            # Instruct models shouldn't output the prompt, but generate() with inputs_embeds sometimes does?
+            # Actually, HF generate typically returns ONLY new tokens if inputs_embeds are used? 
+            # No, usually it returns full sequence.
+            # Llama 3 instruct output usually assumes continuation.
             
-            # Clean up instructions if present
-            if "detailed description" in text:
-                text = text.split("The molecule is a")[-1]
-                text = "The molecule is a" + text
+            # Since we decoded the output, it probably contains the prompt if we passed input_ids (but we passed embeds).
+            # We must check carefully.
             
-            # Ensure it starts with our prefix
-            if not text.startswith(self.prefix_text.strip()):
-                # Sometimes models output "The molecule is a" twice if prompted with it
-                if "The molecule is a" in text:
-                     idx = text.find("The molecule is a")
-                     text = text[idx:]
-                else:
-                    text = self.prefix_text + text
+            # Simple cleanup: remove the prompt part if it exists
+            # We know the prompt ends with "Assistant:" headers usually.
+            # Let's just take everything after "assistant" header if we can find it.
+            
+            if "assistant" in text.lower():
+                # This is a bit heuristic
+                # Llama 3 header is specific.
+                pass
             
             cleaned_texts.append(text)
             

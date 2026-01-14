@@ -10,3 +10,7 @@ einops>=0.7.0
 sentencepiece>=0.2.0
 pyarrow>=14.0.0
 wandb
+rdkit-pypi>=2023.9.5
+bitsandbytes>=0.43.0
+bert-score
+nltk

@@ -302,7 +302,14 @@ def main():
     print("Initializing model...")
     print("="*80)
     model = GraphToTextModel(freeze_llm=True, token=config.hf_token)
-    model = model.to(config.DEVICE)
+    # model = model.to(config.DEVICE) # LLM is handled by device_map="auto"
+    # We ensure other components are on the correct device
+    model.graph_encoder.to(config.DEVICE)
+    model.qformer.to(config.DEVICE)
+    model.graph_to_llm_proj.to(config.DEVICE)
+    model.text_proj.to(config.DEVICE)
+    model.lm_head.to(config.DEVICE)
+    model.temp.data = model.temp.data.to(config.DEVICE)
     
     print("\n" + "="*80)
     print("Loading datasets...")

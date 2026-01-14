@@ -30,7 +30,8 @@ QFORMER_NUM_HEADS = 8  # 8
 # LLM Decoder
 hf_token = "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"
 
-LLM_MODEL_NAME = "meta-llama/Llama-3.2-3B"
+LLM_MODEL_NAME = "Qwen/Qwen2.5-1.5B-Instruct"
+GRAPH_TOKEN = "<graph>"
 USE_LORA = True  # Enabled LoRA for efficient fine-tuning
 LORA_R = 16
 LORA_ALPHA = 32
@@ -44,12 +45,12 @@ LORA_DROPOUT = 0.05
 # Stage 2: Graph Encoder + Q-Former + Projector (Alignment to Frozen LLM)
 # Stage 3: Graph Encoder + Q-Former + Projector + LLM LoRA (End-to-End)
 
-EPOCHS_STAGE1 = 10  # Increased for retrieval alignment
-EPOCHS_STAGE2 = 3   # Quick alignment to LLM token space
-EPOCHS_STAGE3 = 3  # Generative fine-tuning
+EPOCHS_STAGE1 = 2  # Reduced to keep total training time low
+EPOCHS_STAGE2 = 1   # Quick alignment to LLM token space
+EPOCHS_STAGE3 = 2  # Generative fine-tuning
 
-BATCH_SIZE = 4  # Reduced to 4 for 4B model on 24GB GPU
-GRADIENT_ACCUMULATION_STEPS = 32  # Increased to maintain effective batch size
+BATCH_SIZE = 4  # Optimized for A5000 (24GB)
+GRADIENT_ACCUMULATION_STEPS = 8  # Effective batch size = 32
 
 # Learning Rates
 LEARNING_RATE_STAGE1_HEAD = 2e-4  # Stage 1: Q-Former
