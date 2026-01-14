@@ -27,6 +27,10 @@ class MoleculeGINE(nn.Module):
         )
 
     def forward(self, x, edge_index, edge_attr, batch):
+        # Convert to float if needed (handles integer node/edge features)
+        x = x.float()
+        edge_attr = edge_attr.float()
+        
         x = self.node_proj(x)
         e = self.edge_proj(edge_attr)
 

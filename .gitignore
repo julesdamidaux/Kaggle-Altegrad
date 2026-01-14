@@ -31,3 +31,12 @@ checkpoints/
 
 # OS
 .DS_Store
+
+# Logs
+*.log
+nohup.out
+training_*.log
+inference_*.log
+
+# Text files
+*.txt
