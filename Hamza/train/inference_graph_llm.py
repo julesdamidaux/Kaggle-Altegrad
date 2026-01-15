@@ -14,6 +14,7 @@ import torch
 import pandas as pd
 from torch_geometric.data import Batch as PyGBatch
 from transformers import AutoTokenizer
+from peft import PeftModel
 from tqdm import tqdm
 
 # Add parent directories to path
@@ -36,24 +37,48 @@ def load_model_and_tokenizer(checkpoint_dir: str):
     
     # Create model config (should match training config)
     config = ModelConfig()
-    
-    # Load model
+
+    # For inference we load the base LLM and then attach trained LoRA adapters
+    # from the checkpoint directory instead of expecting a full pytorch_model.bin
+    # Checkpoints contain:
+    #   - adapter_model.safetensors / adapter_config.json (LoRA)
+    #   - custom_components.pt (projector + prompts)
+
+    # Do not create fresh LoRA weights inside GraphLLMModel; we'll load them from disk
+    config.use_lora = False
+
+    # Initialize model (loads graph encoder, base LLM, projector, prompts)
     model = GraphLLMModel(config)
-    
-    # Load trained weights
-    # Note: For LoRA models, you might need to load differently
-    # This is a simplified version
+
+    # Attach trained LoRA adapters to the base LLM
     try:
-        state_dict = torch.load(
-            os.path.join(checkpoint_dir, "pytorch_model.bin"),
-            map_location='cpu'
+        model.llm = PeftModel.from_pretrained(
+            model.llm,
+            checkpoint_dir,
+            is_trainable=False,
         )
-        model.load_state_dict(state_dict, strict=False)
-        print("✓ Model loaded successfully")
+        print("✓ Loaded LoRA adapters from checkpoint")
     except Exception as e:
-        print(f"Warning: Could not load full model: {e}")
-        print("Attempting to load LoRA adapters...")
-        # For LoRA models, the base model and adapters are loaded separately
+        print(f"Warning: Could not load LoRA adapters from {checkpoint_dir}: {e}")
+
+    # Load custom components (graph projector + learnable prompts)
+    custom_path = os.path.join(checkpoint_dir, "custom_components.pt")
+    if os.path.exists(custom_path):
+        try:
+            custom_state = torch.load(custom_path, map_location="cpu")
+            if "graph_projector" in custom_state:
+                model.graph_projector.load_state_dict(custom_state["graph_projector"])
+            if "learnable_prompts" in custom_state:
+                with torch.no_grad():
+                    lp = custom_state["learnable_prompts"]
+                    # lp may be a Parameter or Tensor
+                    lp_data = lp.data if hasattr(lp, "data") else lp
+                    model.learnable_prompts.copy_(lp_data)
+            print("✓ Loaded custom components from custom_components.pt")
+        except Exception as e:
+            print(f"Warning: Failed to load custom_components.pt: {e}")
+    else:
+        print("Warning: custom_components.pt not found; using randomly initialized projector and prompts")
     
     model.eval()
     
@@ -87,19 +112,20 @@ def generate_description(model, tokenizer, graph, max_new_tokens=256, device='cu
             graph_batch.edge_attr.float(),
             graph_batch.batch,
         )
-        
-        # Project to LLM space
-        graph_embeds = model.graph_projector(graph_encodings)
-        
-        # Get learnable prompts
-        prompt_embeds = model.learnable_prompts.unsqueeze(0)
-        
-        # Get text embeddings
+
+        # Get text embeddings first to determine target dtype
         text_embeds = model.llm.get_input_embeddings()(inputs.input_ids)
-        
+        target_dtype = text_embeds.dtype
+
+        # Project to LLM space and align dtype with LLM embeddings
+        graph_embeds = model.graph_projector(graph_encodings).to(target_dtype)
+
+        # Get learnable prompts and align dtype
+        prompt_embeds = model.learnable_prompts.unsqueeze(0).to(target_dtype)
+
         # Concatenate
         combined_embeds = torch.cat([prompt_embeds, graph_embeds, text_embeds], dim=1)
-        
+
         # Create attention mask
         graph_attention = torch.ones(
             1,
